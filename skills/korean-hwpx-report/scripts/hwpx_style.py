@@ -31,13 +31,17 @@ def char_pr(cid, font_id, size_pt, bold=False, color="#000000", ratio=100, spaci
 
 
 def para_pr(pid, align="LEFT", left_mm=0.0, hang_mm=0.0,
-            prev_pt=0.0, next_pt=0.0, line=162, border_fill_id=None):
+            prev_pt=0.0, next_pt=0.0, line=162, border_fill_id=None,
+            break_non_latin="BREAK_WORD"):
     """hang_mm > 0 이면 내어쓰기(둘째 줄부터 그만큼 들여쓴다).
 
     주의) hp:switch 의 hp:case(HwpUnitChar) 분기는 한글이 우선해서 읽는데,
     이 분기의 값은 hp:default 의 '절반'으로 적어야 한다. 한글이 만든 파일을
     뜯어보면 intent 가 default -6878 / case -3439 처럼 정확히 2배 차이가 난다.
     두 분기에 같은 값을 넣으면 들여쓰기가 두 배로 적용되어 레이아웃이 무너진다.
+
+    break_non_latin: 한글 줄나눔. 이름과 반대로 "BREAK_WORD" = 어절 단위(기본),
+    "KEEP_WORD" = 글자 단위다(hwpx_fit.WORD / hwpx_fit.CHAR).
     """
     # 한글이 실제로 적용하는 값은 hp:case 쪽이다. 따라서 요청한 치수를 case 에 넣고
     # hp:default 에는 그 2배를 넣는다(한글이 만든 파일의 관례).
@@ -58,7 +62,7 @@ def para_pr(pid, align="LEFT", left_mm=0.0, hang_mm=0.0,
         f'snapToGrid="0" suppressLineNumbers="0" checked="0" textDir="LTR">'
         f'<hh:align horizontal="{align}" vertical="BASELINE"/>'
         '<hh:heading type="NONE" idRef="0" level="0"/>'
-        '<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" '
+        f'<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="{break_non_latin}" widowOrphan="0" '
         'keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>'
         '<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>'
         '<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">'

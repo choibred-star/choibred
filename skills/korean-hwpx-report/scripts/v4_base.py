@@ -13,7 +13,8 @@
 import re
 from hwpx.document import HwpxDocument
 from hwpx_style import char_pr, para_pr, border_fill, patch, HU_MM
-from hwpx_fit import fit, count_lines, BASE as SPACING_BASE, MIN as SPACING_MIN
+import hwpx_fit
+from hwpx_fit import fit, count_lines, WORD, CHAR, BASE as SPACING_BASE
 
 # ---------- 서식 규격 (참고 문서에서 추출) ----------
 FONT   = "휴먼명조"          # 본문
@@ -46,6 +47,7 @@ d.page.set_margins(left=HU_MM(20), right=HU_MM(20), top=HU_MM(10), bottom=HU_MM(
 FID  = int(d.styles.ensure_font(FONT))
 HFID = int(d.styles.ensure_font(HFONT))
 QFID = int(d.styles.ensure_font(QFONT))
+FACE = {FID: FONT, HFID: HFONT, QFID: QFONT}
 
 _h0   = d.package.get_text("Contents/header.xml")
 CBASE = len(re.findall(r'<hh:charPr id="', _h0))
@@ -64,12 +66,12 @@ def cstyle(size_pt, bold=False, font_id=None, ratio=100, spacing=0, color="#0000
     return _cc[key]
 
 
-def pstyle(align=ALIGN, hang=0.0, prev=0.0, nxt=0.0, border=None, line=LINE):
-    key = (align, hang, prev, nxt, border, line)
+def pstyle(align=ALIGN, hang=0.0, prev=0.0, nxt=0.0, border=None, line=LINE, brk=WORD):
+    key = (align, hang, prev, nxt, border, line, brk)
     if key not in _pc:
         pid = PBASE + len(PARA_DEFS)
         PARA_DEFS.append(para_pr(pid, align, 0.0, hang, prev, nxt,
-                                 line=line, border_fill_id=border))
+                                 line=line, border_fill_id=border, break_non_latin=brk))
         _pc[key] = pid
     return _pc[key]
 
@@ -77,22 +79,29 @@ def pstyle(align=ALIGN, hang=0.0, prev=0.0, nxt=0.0, border=None, line=LINE):
 EM = lambda pt: pt * 0.352778
 
 
-def split_runs(text, bold, size, spacing=0, lock=False, font=None):
-    """연도 앞 ’ 는 맑은 고딕, () 안은 1pt 작게. lock 이면 크기·자간 고정."""
-    out, depth, buf, cur = [], 0, "", None
+def char_attrs(text, bold, size, spacing=0, lock=False, font=None):
+    """글자마다 (글자, 크기, 굵게, 글꼴id, 자간).
+       연도 앞 ’ 는 맑은 고딕, () 안은 1pt 작게. lock 이면 크기·자간 고정."""
+    out, depth = [], 0
     for ch in text:
         sz = size if lock else (size - 1 if (depth > 0 or ch in "()") else size)
-        st = cstyle(sz, bold, QFID if ch in "’'" else (font or FID),
-                    100, 0 if lock else spacing)
+        out.append((ch, sz, bold, QFID if ch in "’'" else (font or FID), 0 if lock else spacing))
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+    return out
+
+
+def split_runs(text, bold, size, spacing=0, lock=False, font=None):
+    out, buf, cur = [], "", None
+    for ch, sz, b, fid, sp in char_attrs(text, bold, size, spacing, lock, font):
+        st = cstyle(sz, b, fid, 100, sp)
         if st != cur:
             if buf:
                 out.append((buf, cur))
             buf, cur = "", st
         buf += ch
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth = max(0, depth - 1)
     if buf:
         out.append((buf, cur))
     return out
@@ -107,18 +116,23 @@ def para(parts, size=BODY, align=ALIGN, before=0.0, after=0.0,
        내어쓰기 폭은 앞머리 실제 폭으로 자동 계산한다."""
     parts = [(p_ + (False,))[:3] if len(p_) == 2 else p_ for p_ in parts]
     text  = "".join(t for t, _, _ in parts)
-    locks = [lk for t, _, lk in parts for _ in t]
 
     if hang is None:
         hang = 0.0          # 내어쓰기는 HANG() 으로 따로 계산해 넘긴다
 
-    spacing = 0
-    if align in ("JUSTIFY", "LEFT"):
-        spacing = fit(text, size, first_w=TEXT_W, rest_w=TEXT_W - hang, locks=locks)
-        if spacing != SPACING_BASE:
-            ADJUSTED.append((spacing, text[:36]))
+    def build(sp):
+        return [(ch, sz, FACE[fid], s_)
+                for txt, bold, lock in parts
+                for ch, sz, _, fid, s_ in char_attrs(txt, bold, size, sp, lock, font)]
 
-    p = d.add_paragraph("", para_pr_id_ref=pstyle(align, hang, before, after, border, line))
+    spacing, brk = 0, WORD
+    if align in ("JUSTIFY", "LEFT") and text.strip():
+        widths = [HU_MM(TEXT_W), HU_MM(TEXT_W) - HU_MM(hang)]
+        spacing, brk, _, worst, orphan = fit(build, widths)
+        if spacing != SPACING_BASE or brk != WORD or worst > hwpx_fit.OK or orphan:
+            ADJUSTED.append((spacing, brk, round(worst, 2), orphan, text.strip()[:30]))
+
+    p = d.add_paragraph("", para_pr_id_ref=pstyle(align, hang, before, after, border, line, brk))
     for txt, bold, lock in parts:
         for chunk, cid in split_runs(txt, bold, size, spacing, lock, font):
             p.add_run(chunk, char_pr_id_ref=cid)
@@ -290,7 +304,8 @@ def _col_align(rows, widths_mm, header_rows):
     out = []
     for c_, w in enumerate(widths_mm):
         inner = w - 2 * CELL_LR
-        long_ = any(count_lines(row[c_], TSIZE_CELL, SPACING_BASE, inner, inner) > 1
+        long_ = any(count_lines([(ch, TSIZE_CELL, FONT, SPACING_BASE) for ch in row[c_]],
+                                HU_MM(inner)) > 1
                     for row in rows[header_rows:])
         out.append("JUSTIFY" if long_ else "CENTER")
     return out
@@ -365,5 +380,10 @@ BORDER_SPECS = [
 def save(path):
     d.save_to_path(path, mode="rebuild")
     patch(path, CHAR_DEFS, PARA_DEFS, BORDER_SPECS)
-    spaces = sorted({sp for sp, _ in ADJUSTED})
-    print("saved", path, f"| 자간 기본 {SPACING_BASE}%, 조정 문단 {len(ADJUSTED)}개 {spaces}")
+    print("saved", path, f"| 자간 기본 {SPACING_BASE}%, 조정 문단 {len(ADJUSTED)}개"
+          + ("" if hwpx_fit.ENGINE else "  (python-hwpx<6.8: 근사 계산)"))
+    for sp, brk, worst, orphan, head in ADJUSTED:
+        note = "글자 단위" if brk == CHAR else "어절 단위"
+        warn = ("  ← 외톨이 줄. 문구를 줄이거나 늘릴 것" if orphan else
+                "  ← 아직 벌어짐. 문구를 다듬을 것" if worst > hwpx_fit.OK else "")
+        print(f"   자간 {sp:+d}% {note} 벌어짐 {worst:.2f}em | {head}{warn}")
